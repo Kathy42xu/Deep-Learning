@@ -1,6 +1,6 @@
-# Just Train Twice: Improving Group Robustness without Training Group Information
+# Just Train Twice with selection layer
 
-This code implements the following paper: 
+This code implements the following paper with modification on selection layer: 
 
 > [Just Train Twice: Improving Group Robustness without Training Group Information](https://arxiv.org/pdf/2107.09044.pdf)
 
