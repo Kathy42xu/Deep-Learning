@@ -1,100 +1,86 @@
-import os
+import sys
+sys.path.append('/home/20074688d/jtt')  # Add the path to the jtt directory
+
+from data.cub_dataset import CUBDataset, custom_collate_fn
 import torch
-import torch.nn as nn
-import torchvision
+from torchvision.models import resnet50
 from torchvision import transforms
-from PIL import Image
+from torch.utils.data import DataLoader
 from tqdm import tqdm
+
+from PIL import Image
 import numpy as np
+import os
+import pandas as pd
 
-from models import model_attributes
-from data.data import dataset_attributes
-from data.dro_dataset import DRODataset
-from utils import get_loader
+from torchvision import transforms
 
-# Define your process_item function if you have one
-def your_process_item_function(item):
-    # Your processing logic here
-    return item
+# Define your data transformation
+your_transform = transforms.Compose([
+    transforms.Resize((224, 224)),  # Resize the image to 224x224 pixels
+    transforms.ToTensor(),           # Convert the image to a PyTorch tensor
+    # Add more transformations if needed, such as normalization
+])
 
-# Modified get_model function
-def get_model(model, pretrained, resume, n_classes, dataset, log_dir):
-    if resume:
-        model = torch.load(os.path.join(log_dir, "last_model.pth"))
-        d = train_data.input_size()[0]
-    elif model_attributes[model]["feature_type"] in ("precomputed", "raw_flattened"):
-        assert pretrained
-        # Load precomputed features
-        d = train_data.input_size()[0]
-        model = nn.Linear(d, n_classes)
-        model.has_aux_logits = False
-    elif model == "resnet50":
-        model = torchvision.models.resnet50(pretrained=pretrained)
-        d = model.fc.in_features
-        model.fc = nn.Linear(d, n_classes)
-    elif model == "resnet34":
-        model = torchvision.models.resnet34(pretrained=pretrained)
-        d = model.fc.in_features
-        model.fc = nn.Linear(d, n_classes)
-    elif model == "wideresnet50":
-        model = torchvision.models.wide_resnet50_2(pretrained=pretrained)
-        d = model.fc.in_features
-        model.fc = nn.Linear(d, n_classes)
-    elif model.startswith('bert'):
-        if dataset == "MultiNLI":
-            assert dataset == "MultiNLI"
-            from pytorch_transformers import BertConfig, BertForSequenceClassification
-            config_class = BertConfig
-            model_class = BertForSequenceClassification
-            config = config_class.from_pretrained("bert-base-uncased", num_labels=3, finetuning_task="mnli")
-            model = model_class.from_pretrained("bert-base-uncased", from_tf=False, config=config)
-        elif dataset == "jigsaw":
-            from transformers import BertForSequenceClassification
-            model = BertForSequenceClassification.from_pretrained(model, num_labels=n_classes)
-            print(f'n_classes = {n_classes}')
-        else:
-            raise NotImplementedError
-    else:
-        raise ValueError(f"{model} Model not recognized.")
 
-    return model
-
-# Function for feature extraction
+# Function to extract features from the last layer
 def extract_features(model, dataloader):
+    model.eval()
     features = []
-    labels = []
-
+    img_ids = []  # Collect image IDs
     with torch.no_grad():
-        model.eval()
-        for inputs, targets in dataloader:
-            # Forward pass to get features
-            outputs = model(inputs)
-            features.append(outputs)
-            labels.append(targets)
+        for inputs, targets, confounders, ids in tqdm(dataloader, desc="Extracting Features"):
+            inputs = inputs.to(device)
+            output = model(inputs)
+            features.append(output.cpu())
+            img_ids.extend(ids)  # Collect IDs
+    return features, img_ids
 
-    features = torch.cat(features, dim=0)
-    labels = torch.cat(labels, dim=0)
 
-    return features, labels
 
-# Your existing code for preparing data, loading datasets, etc.
+if __name__ == "__main__":
+    # Set device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Example: Replace YourDatasetClass with your actual dataset class
-train_data = YourDatasetClass(...)  # Initialize your train dataset
-val_data = YourDatasetClass(...)    # Initialize your validation dataset
+    # Load pre-trained ResNet-50 model checkpoint
+    checkpoint_path = "/home/20074688d/jtt/best_model.pth"
+    checkpoint = torch.load(checkpoint_path, map_location=device)
 
-# Get the data loaders
-train_loader = get_loader(train_data, train=True, reweight_groups=None, batch_size=32, num_workers=4, pin_memory=True)
-val_loader = get_loader(val_data, train=False, reweight_groups=None, batch_size=32, num_workers=4, pin_memory=True)
+    # Initialize ResNet-50 model and load checkpoint weights
+    # Initialize ResNet-50 model and load checkpoint weights
+    model = resnet50(pretrained=False)
 
-# Get the ResNet-50 model for feature extraction
-model = get_model(model="resnet50", pretrained=True, resume=False, n_classes=2, dataset="CUB", log_dir="./logs")
+    # Modify the model to remove the last fully connected layer
+    model = torch.nn.Sequential(*(list(model.children())[:-1]))
 
-# Extract features using the train loader
-train_features, train_labels = extract_features(model, train_loader)
+    model = model.to(device)
+    model.eval()
 
-# Extract features using the validation loader
-val_features, val_labels = extract_features(model, val_loader)
 
-# Now, train_features and val_features contain the extracted features for training and validation sets.
-# You can use these features for further analysis or downstream tasks.
+    # Initialize your custom dataset and dataloader
+    your_data_path = "/home/20074688d/jtt/jtt/cub/data/waterbird_complete95_forest2water2"
+    metadata_path = os.path.join(your_data_path, "metadata.csv")
+    metadata = pd.read_csv('/home/20074688d/jtt/jtt/cub/data/waterbird_complete95_forest2water2/metadata.csv', dtype={'y': 'int', 'place': 'int'})
+    confounder_names = ["place"]  # Adjust this based on your actual confounder column name(s)
+    target_name = "y"  # Adjust this based on your actual target column name
+
+    # Update: Pass metadata, target_name, and confounder_names
+    your_dataset = CUBDataset(metadata, target_name, confounder_names, your_data_path, transform=your_transform)
+    dataloader = DataLoader(your_dataset, batch_size=64, shuffle=False, num_workers=4, collate_fn=custom_collate_fn)  # Adjust parameters
+
+    # Extract features
+    extracted_features, img_ids = extract_features(model, dataloader)
+
+    # Process features to remove singleton dimensions
+    features_array = np.concatenate([f.numpy() for f in extracted_features], axis=0)
+    features_array = np.squeeze(features_array)  # Adjust dimensions
+
+    # Ensure img_ids_array is 2D
+    img_ids_array = np.array(img_ids).reshape(-1, 1)
+
+    # Combine IDs and features into a single array
+    combined_data = np.hstack((img_ids_array, features_array))
+
+    np.save("/home/20074688d/jtt/feature_with_ids.npy", combined_data)
+
+    print("Feature extraction with image IDs completed.")
